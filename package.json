@@ -1,0 +1,16 @@
+{
+  "name": "tango-create",
+  "version": "0.1.0",
+  "description": "Scaffold a new Tango instrument in seconds",
+  "type": "module",
+  "bin": {
+    "tango-create": "./src/index.ts"
+  },
+  "files": ["src"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MartinGonzalez/tango-create.git"
+  },
+  "keywords": ["tango", "instrument", "scaffold", "cli"],
+  "license": "MIT"
+}
