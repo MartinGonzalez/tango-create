@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 
-import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
+const TEMPLATE_REPO = "https://github.com/MartinGonzalez/tango-instrument-template.git";
 const TANGO_API_TAG = "v0.0.2-rc46";
 
 const CATEGORIES = [
@@ -58,248 +59,56 @@ async function confirm(question: string, fallback = true): Promise<boolean> {
   return answer.toLowerCase().startsWith("y");
 }
 
-// ── Templates ──
+// ── Template processing ──
 
-function packageJson(opts: {
-  name: string;
-  id: string;
-  displayName: string;
-  description: string;
-  category: string;
-  icon: string;
-  label: string;
-  hasBackend: boolean;
-}): string {
-  const manifest: Record<string, unknown> = {
-    id: opts.id,
-    name: opts.displayName,
-    description: opts.description,
-    group: "Custom",
-    category: opts.category,
-    runtime: "react",
-    entrypoint: "./dist/index.js",
-    hostApiVersion: "2.0.0",
-    launcher: {
-      sidebarShortcut: {
-        enabled: true,
-        label: opts.label,
-        icon: opts.icon,
-        order: 50,
-      },
-    },
-    panels: {
-      sidebar: true,
-      first: true,
-      second: false,
-      right: false,
-    },
-    permissions: [],
-  };
-
-  if (opts.hasBackend) {
-    manifest.backendEntrypoint = "./dist/backend.js";
-  }
-
-  return JSON.stringify(
-    {
-      name: opts.name,
-      version: "0.1.0",
-      private: true,
-      type: "module",
-      main: "dist/index.js",
-      scripts: {
-        dev: "bun node_modules/tango-api/src/cli.ts dev",
-        build: "bun node_modules/tango-api/src/cli.ts build",
-        sync: "bun node_modules/tango-api/src/cli.ts sync",
-        validate: "bun node_modules/tango-api/src/cli.ts validate",
-        test: "bun test ./test",
-      },
-      dependencies: {
-        "tango-api": `github:MartinGonzalez/tango-api#${TANGO_API_TAG}`,
-      },
-      devDependencies: {
-        "@types/react": "^18.0.0",
-        react: "^18.3.1",
-        "react-dom": "^18.3.1",
-      },
-      tango: {
-        instrument: manifest,
-      },
-    },
-    null,
-    2,
-  );
-}
-
-function frontendIndex(displayName: string, hasBackend: boolean): string {
-  const backendImport = hasBackend
-    ? `
-  // Call a backend action
-  async function handleGreet() {
-    try {
-      const result = await api.actions.call<{ name: string }, { greeting: string }>(
-        "hello",
-        { name: "Tango" },
-      );
-      setMessage(result.greeting);
-    } catch (err: any) {
-      setMessage(\`Error: \${err.message}\`);
+function walkFiles(dir: string): string[] {
+  const results: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const fullPath = join(dir, entry);
+    if (statSync(fullPath).isDirectory()) {
+      if (entry === "node_modules" || entry === ".git") continue;
+      results.push(...walkFiles(fullPath));
+    } else {
+      results.push(fullPath);
     }
   }
-`
-    : "";
+  return results;
+}
 
-  const backendButton = hasBackend
-    ? `
-          <UIButton label="Call Backend" variant="secondary" onClick={handleGreet} />`
-    : "";
+function replaceVariables(content: string, vars: Record<string, string>): string {
+  let result = content;
+  for (const [key, value] of Object.entries(vars)) {
+    result = result.replaceAll(`{{${key}}}`, value);
+  }
+  return result;
+}
 
-  return `import { useState } from "react";
-import {
-  defineReactInstrument,
-  useInstrumentApi,
-  UIRoot,
-  UISection,
-  UICard,
-  UIButton,
-} from "tango-api";
-
-function SidebarPanel() {
-  return (
-    <UIRoot style={{ padding: 12 }}>
-      <UISection title="${displayName}">
-        <UICard>
-          <p style={{ opacity: 0.6, fontSize: 13 }}>
-            Your instrument sidebar. Add navigation, lists, or controls here.
-          </p>
-        </UICard>
-      </UISection>
-    </UIRoot>
+function stripConditionalBlocks(content: string, block: string): string {
+  // Strip single-line patterns: // {{#IF_BLOCK}} and // {{/IF_BLOCK}}
+  // and everything between them (for code files)
+  const singleLineRegex = new RegExp(
+    `^[\\t ]*(?:\\/\\/|\\{/\\*) *\\{\\{#${block}\\}\\}.*$\\n([\\s\\S]*?)^[\\t ]*(?:\\/\\/|\\{/\\*) *\\{\\{/${block}\\}\\}.*$\\n?`,
+    "gm",
   );
-}
+  let result = content.replace(singleLineRegex, "");
 
-function MainPanel() {
-  const api = useInstrumentApi();
-  const [message, setMessage] = useState("Hello from ${displayName}!");
-${backendImport}
-  return (
-    <UIRoot style={{ padding: 12 }}>
-      <UISection title="${displayName}">
-        <UICard>
-          <p style={{ fontSize: 14, marginBottom: 12 }}>{message}</p>
-          <div style={{ display: "flex", gap: 8 }}>
-            <UIButton label="Click me" variant="primary" onClick={() => setMessage("Button clicked!")} />${backendButton}
-          </div>
-        </UICard>
-      </UISection>
-    </UIRoot>
+  // Strip inline JSX comment patterns: {/* {{#IF_BLOCK}} */} ... {/* {{/IF_BLOCK}} */}
+  const jsxRegex = new RegExp(
+    `[\\t ]*\\{/\\* *\\{\\{#${block}\\}\\} *\\*/\\}\\s*\\n?([\\s\\S]*?)\\{/\\* *\\{\\{/${block}\\}\\} *\\*/\\}\\s*\\n?`,
+    "g",
   );
+  result = result.replace(jsxRegex, "");
+
+  return result;
 }
 
-export default defineReactInstrument({
-  defaults: {
-    visible: {
-      sidebar: true,
-      first: true,
-    },
-  },
-  panels: {
-    sidebar: SidebarPanel,
-    first: MainPanel,
-  },
-});
-`;
-}
-
-function backendFile(): string {
-  return `import {
-  defineBackend,
-  type InstrumentBackendContext,
-} from "tango-api/backend";
-
-async function onStart(ctx: InstrumentBackendContext): Promise<void> {
-  ctx.logger.info("Backend started");
-}
-
-async function onStop(): Promise<void> {
-  // Clean up resources here
-}
-
-export default defineBackend({
-  kind: "tango.instrument.backend.v2",
-  onStart,
-  onStop,
-  actions: {
-    hello: {
-      input: {
-        type: "object",
-        properties: {
-          name: { type: "string" },
-        },
-      },
-      output: {
-        type: "object",
-        properties: {
-          greeting: { type: "string" },
-        },
-        required: ["greeting"],
-      },
-      handler: async (
-        _ctx: InstrumentBackendContext,
-        input?: { name?: string },
-      ) => {
-        return { greeting: \`Hello, \${input?.name ?? "world"}!\` };
-      },
-    },
-  },
-});
-`;
-}
-
-function tsconfig(): string {
-  return JSON.stringify(
-    {
-      compilerOptions: {
-        target: "ESNext",
-        module: "ESNext",
-        moduleResolution: "bundler",
-        jsx: "react-jsx",
-        strict: true,
-        esModuleInterop: true,
-        skipLibCheck: true,
-        noEmit: true,
-        allowImportingTsExtensions: true,
-      },
-      include: ["src"],
-    },
-    null,
-    2,
-  );
-}
-
-function tangoEnvDts(): string {
-  return `declare namespace TangoSettings {
-  type Instrument = {
-    [key: string]: unknown;
-  };
-}
-`;
-}
-
-function gitignore(): string {
-  return `node_modules/
-dist/
-bun.lock
-bun.lockb
-`;
-}
-
-function tangoJson(dirName: string): string {
-  return JSON.stringify(
-    { instruments: [{ path: "." }] },
-    null,
-    2,
-  );
+function removeBackendFromPackageJson(targetDir: string): void {
+  const pkgPath = join(targetDir, "package.json");
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+  if (pkg.tango?.instrument?.backendEntrypoint) {
+    delete pkg.tango.instrument.backendEntrypoint;
+  }
+  writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
 }
 
 // ── Main ──
@@ -312,7 +121,6 @@ async function main() {
   // Name
   const rawName = await ask("Instrument directory name", "my-instrument");
   const dirName = rawName.replace(/[^a-z0-9-]/gi, "-").toLowerCase();
-  const id = dirName;
 
   // Display name
   const defaultDisplayName = dirName
@@ -335,7 +143,7 @@ async function main() {
 
   console.log("");
 
-  // Create directory
+  // Check target doesn't exist
   const targetDir = resolve(process.cwd(), dirName);
   if (existsSync(targetDir)) {
     console.log(`  \x1b[31mError:\x1b[0m Directory "${dirName}" already exists.`);
@@ -343,28 +151,74 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`  Creating ${dirName}/...`);
-  mkdirSync(join(targetDir, "src"), { recursive: true });
-
-  // Write files
-  const description = `A Tango instrument.`;
-
-  writeFileSync(
-    join(targetDir, "package.json"),
-    packageJson({ name: dirName, id, displayName, description, category, icon, label, hasBackend }),
-  );
-  writeFileSync(join(targetDir, "src", "index.tsx"), frontendIndex(displayName, hasBackend));
-  if (hasBackend) {
-    writeFileSync(join(targetDir, "src", "backend.ts"), backendFile());
+  // Clone template
+  console.log("  Cloning template...");
+  const clone = Bun.spawn(["git", "clone", "--depth", "1", TEMPLATE_REPO, dirName], {
+    cwd: resolve(process.cwd()),
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const cloneExit = await clone.exited;
+  if (cloneExit !== 0) {
+    const stderr = await new Response(clone.stderr).text();
+    console.log(`  \x1b[31mError:\x1b[0m Failed to clone template.`);
+    if (stderr) console.log(`  ${stderr.trim()}`);
+    rl.close();
+    process.exit(1);
   }
-  writeFileSync(join(targetDir, "tsconfig.json"), tsconfig());
-  writeFileSync(join(targetDir, "tango-env.d.ts"), tangoEnvDts());
-  writeFileSync(join(targetDir, ".gitignore"), gitignore());
-  writeFileSync(join(targetDir, "tango.json"), tangoJson(dirName));
 
+  // Remove .git from clone
+  rmSync(join(targetDir, ".git"), { recursive: true, force: true });
+
+  // Template variables
+  const vars: Record<string, string> = {
+    INSTRUMENT_ID: dirName,
+    DISPLAY_NAME: displayName,
+    DESCRIPTION: "A Tango instrument.",
+    CATEGORY: category,
+    ICON: icon,
+    SIDEBAR_LABEL: label,
+    TANGO_API_TAG: TANGO_API_TAG,
+  };
+
+  // Process all files
+  console.log("  Applying template variables...");
+  const files = walkFiles(targetDir);
+  for (const filePath of files) {
+    let content = readFileSync(filePath, "utf-8");
+    content = replaceVariables(content, vars);
+    if (!hasBackend) {
+      content = stripConditionalBlocks(content, "IF_BACKEND");
+    } else {
+      // Keep the content but remove the conditional markers
+      content = content.replace(/^[\t ]*(?:\/\/|{\/\*) *\{\{#IF_BACKEND\}\}.*$\n?/gm, "");
+      content = content.replace(/^[\t ]*(?:\/\/|{\/\*) *\{\{\/IF_BACKEND\}\}.*$\n?/gm, "");
+      content = content.replace(/[\t ]*\{\/\* *\{\{#IF_BACKEND\}\} *\*\/\}\s*\n?/g, "");
+      content = content.replace(/[\t ]*\{\/\* *\{\{\/IF_BACKEND\}\} *\*\/\}\s*\n?/g, "");
+    }
+    writeFileSync(filePath, content);
+  }
+
+  // Handle no-backend: remove backend file and strip from package.json
+  if (!hasBackend) {
+    const backendPath = join(targetDir, "src", "backend.ts");
+    if (existsSync(backendPath)) {
+      unlinkSync(backendPath);
+    }
+    removeBackendFromPackageJson(targetDir);
+  }
+
+  // Initialize fresh git repo
+  console.log("  Initializing git repository...");
+  const gitInit = Bun.spawn(["git", "init"], {
+    cwd: targetDir,
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  await gitInit.exited;
+
+  // Install dependencies
   console.log("  Installing dependencies...");
-
-  // Install deps
   const install = Bun.spawn(["bun", "install"], {
     cwd: targetDir,
     stdout: "ignore",
