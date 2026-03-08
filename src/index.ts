@@ -21,11 +21,35 @@ const ICONS = [
   "folder", "search", "terminal", "lightning", "globe", "lock", "heart",
 ] as const;
 
-// ── Interactive prompt ──
+// ── CLI flags ──
+
+function parseFlags(argv: string[]): Record<string, string | boolean> {
+  const flags: Record<string, string | boolean> = {};
+  const args = argv.slice(2); // skip bun + script path
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (!arg.startsWith("--")) continue;
+    const key = arg.slice(2);
+    const next = args[i + 1];
+    // Boolean flags (no value or next arg is also a flag)
+    if (key === "backend" || key === "no-backend") {
+      flags[key] = true;
+    } else if (next && !next.startsWith("--")) {
+      flags[key] = next;
+      i++;
+    }
+  }
+  return flags;
+}
+
+const flags = parseFlags(process.argv);
+
+// ── Interactive prompt (skipped when flag provided) ──
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 
-function ask(question: string, fallback?: string): Promise<string> {
+function ask(question: string, fallback?: string, flagValue?: string): Promise<string> {
+  if (flagValue !== undefined) return Promise.resolve(flagValue);
   const suffix = fallback ? ` (${fallback})` : "";
   return new Promise((resolve) => {
     rl.question(`  ${question}${suffix}: `, (answer) => {
@@ -34,7 +58,13 @@ function ask(question: string, fallback?: string): Promise<string> {
   });
 }
 
-function choose(question: string, options: readonly string[], fallback: string): Promise<string> {
+function choose(question: string, options: readonly string[], fallback: string, flagValue?: string): Promise<string> {
+  if (flagValue !== undefined) {
+    // Validate the flag value is a valid option
+    if (options.includes(flagValue as any)) return Promise.resolve(flagValue);
+    console.log(`  \x1b[33mWarning:\x1b[0m "${flagValue}" is not a valid option. Using "${fallback}".`);
+    return Promise.resolve(fallback);
+  }
   return new Promise((resolve) => {
     console.log(`  ${question}`);
     options.forEach((opt, i) => {
@@ -52,7 +82,8 @@ function choose(question: string, options: readonly string[], fallback: string):
   });
 }
 
-async function confirm(question: string, fallback = true): Promise<boolean> {
+async function confirm(question: string, fallback = true, flagValue?: boolean): Promise<boolean> {
+  if (flagValue !== undefined) return flagValue;
   const hint = fallback ? "Y/n" : "y/N";
   const answer = await ask(`${question} [${hint}]`);
   if (!answer) return fallback;
@@ -84,21 +115,27 @@ function replaceVariables(content: string, vars: Record<string, string>): string
 }
 
 function stripConditionalBlocks(content: string, block: string): string {
-  // Strip single-line patterns: // {{#IF_BLOCK}} and // {{/IF_BLOCK}}
-  // and everything between them (for code files)
   const singleLineRegex = new RegExp(
     `^[\\t ]*(?:\\/\\/|\\{/\\*) *\\{\\{#${block}\\}\\}.*$\\n([\\s\\S]*?)^[\\t ]*(?:\\/\\/|\\{/\\*) *\\{\\{/${block}\\}\\}.*$\\n?`,
     "gm",
   );
   let result = content.replace(singleLineRegex, "");
 
-  // Strip inline JSX comment patterns: {/* {{#IF_BLOCK}} */} ... {/* {{/IF_BLOCK}} */}
   const jsxRegex = new RegExp(
     `[\\t ]*\\{/\\* *\\{\\{#${block}\\}\\} *\\*/\\}\\s*\\n?([\\s\\S]*?)\\{/\\* *\\{\\{/${block}\\}\\} *\\*/\\}\\s*\\n?`,
     "g",
   );
   result = result.replace(jsxRegex, "");
 
+  return result;
+}
+
+function stripConditionalMarkers(content: string): string {
+  let result = content;
+  result = result.replace(/^[\t ]*(?:\/\/|{\/\*) *\{\{#IF_BACKEND\}\}.*$\n?/gm, "");
+  result = result.replace(/^[\t ]*(?:\/\/|{\/\*) *\{\{\/IF_BACKEND\}\}.*$\n?/gm, "");
+  result = result.replace(/[\t ]*\{\/\* *\{\{#IF_BACKEND\}\} *\*\/\}\s*\n?/g, "");
+  result = result.replace(/[\t ]*\{\/\* *\{\{\/IF_BACKEND\}\} *\*\/\}\s*\n?/g, "");
   return result;
 }
 
@@ -114,12 +151,14 @@ function removeBackendFromPackageJson(targetDir: string): void {
 // ── Main ──
 
 async function main() {
+  const isNonInteractive = Object.keys(flags).length > 0;
+
   console.log("");
   console.log("  \x1b[1m\x1b[35mtango-create\x1b[0m — Scaffold a new Tango instrument");
   console.log("");
 
   // Name
-  const rawName = await ask("Instrument directory name", "my-instrument");
+  const rawName = await ask("Instrument directory name", "my-instrument", flags["name"] as string | undefined);
   const dirName = rawName.replace(/[^a-z0-9-]/gi, "-").toLowerCase();
 
   // Display name
@@ -127,19 +166,20 @@ async function main() {
     .split("-")
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ");
-  const displayName = await ask("Display name", defaultDisplayName);
+  const displayName = await ask("Display name", defaultDisplayName, flags["display-name"] as string | undefined);
 
   // Sidebar label
-  const label = await ask("Sidebar label", displayName);
+  const label = await ask("Sidebar label", displayName, flags["label"] as string | undefined);
 
   // Icon
-  const icon = await choose("Sidebar icon:", ICONS, "puzzle");
+  const icon = await choose("Sidebar icon:", ICONS, "puzzle", flags["icon"] as string | undefined);
 
   // Category
-  const category = await choose("Category:", CATEGORIES, "utilities");
+  const category = await choose("Category:", CATEGORIES, "utilities", flags["category"] as string | undefined);
 
   // Backend
-  const hasBackend = await confirm("Include backend?", true);
+  const backendFlag = flags["backend"] ? true : flags["no-backend"] ? false : undefined;
+  const hasBackend = await confirm("Include backend?", true, backendFlag);
 
   console.log("");
 
@@ -190,11 +230,7 @@ async function main() {
     if (!hasBackend) {
       content = stripConditionalBlocks(content, "IF_BACKEND");
     } else {
-      // Keep the content but remove the conditional markers
-      content = content.replace(/^[\t ]*(?:\/\/|{\/\*) *\{\{#IF_BACKEND\}\}.*$\n?/gm, "");
-      content = content.replace(/^[\t ]*(?:\/\/|{\/\*) *\{\{\/IF_BACKEND\}\}.*$\n?/gm, "");
-      content = content.replace(/[\t ]*\{\/\* *\{\{#IF_BACKEND\}\} *\*\/\}\s*\n?/g, "");
-      content = content.replace(/[\t ]*\{\/\* *\{\{\/IF_BACKEND\}\} *\*\/\}\s*\n?/g, "");
+      content = stripConditionalMarkers(content);
     }
     writeFileSync(filePath, content);
   }
