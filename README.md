@@ -7,7 +7,7 @@ Scaffold a new [Tango](https://github.com/MartinGonzalez/tango-app) instrument i
 ### Interactive (human)
 
 ```bash
-bunx tango-create
+bunx github:MartinGonzalez/tango-create
 ```
 
 Prompts you for instrument name, display name, sidebar icon, category, and whether to include a backend.
@@ -17,7 +17,7 @@ Prompts you for instrument name, display name, sidebar icon, category, and wheth
 Pass all options as flags to skip prompts entirely:
 
 ```bash
-bunx tango-create \
+bunx github:MartinGonzalez/tango-create \
   --name my-tool \
   --display-name "My Tool" \
   --label "My Tool" \
